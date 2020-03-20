@@ -26,6 +26,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
+	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
@@ -134,17 +135,58 @@ type AWSProvider struct {
 
 // AWSConfig contains configuration to create a new AWS provider.
 type AWSConfig struct {
-	DomainFilter         endpoint.DomainFilter
-	ZoneIDFilter         provider.ZoneIDFilter
-	ZoneTypeFilter       provider.ZoneTypeFilter
-	ZoneTagFilter        provider.ZoneTagFilter
-	BatchChangeSize      int
-	BatchChangeInterval  time.Duration
-	EvaluateTargetHealth bool
-	AssumeRole           string
-	APIRetries           int
-	PreferCNAME          bool
-	DryRun               bool
+	DomainFilter           endpoint.DomainFilter
+	ZoneIDFilter           provider.ZoneIDFilter
+	ZoneTypeFilter         provider.ZoneTypeFilter
+	ZoneTagFilter          provider.ZoneTagFilter
+	BatchChangeSize        int
+	BatchChangeInterval    time.Duration
+	EvaluateTargetHealth   bool
+	AssumeRole             string
+	APIRetries             int
+	PreferCNAME            bool
+	UseRegionalSTSEndpoint bool
+	DryRun                 bool
+}
+
+// GetEndpointFromRegion formas a standard sts endpoint url given a region
+func GetEndpointFromRegion(region string) string {
+	endpoint := fmt.Sprintf("https://sts.%s.amazonaws.com", region)
+	if strings.HasPrefix(region, "cn-") {
+		endpoint = fmt.Sprintf("https://sts.%s.amazonaws.com.cn", region)
+	}
+	return endpoint
+}
+
+// IsValidRegion tests for a vaild region name
+func IsValidRegion(promisedLand string) bool {
+	partitions := endpoints.DefaultResolver().(endpoints.EnumPartitions).Partitions()
+	for _, p := range partitions {
+		for region := range p.Regions() {
+			if promisedLand == region {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type endpointResolver struct{}
+
+func (r *endpointResolver) EndpointFor(service, region string, optFns ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
+	log.Infof("Region: %s", region)
+	// only for sts service
+	if service == "sts" {
+		// only if a valid region is explicitly set
+		if IsValidRegion(region) {
+			//iam.Endpoint = GetEndpointFromRegion(region)
+			return endpoints.ResolvedEndpoint{
+				URL:           GetEndpointFromRegion(region),
+				SigningRegion: region,
+			}, nil
+		}
+	}
+	return endpoints.DefaultResolver().EndpointFor(service, region, optFns...)
 }
 
 // NewAWSProvider initializes a new AWS Route53 based Provider.
@@ -159,6 +201,10 @@ func NewAWSProvider(awsConfig AWSConfig) (*AWSProvider, error) {
 			},
 		}),
 	)
+
+	if awsConfig.UseRegionalSTSEndpoint {
+		config = config.WithEndpointResolver(new(endpointResolver))
+	}
 
 	session, err := session.NewSessionWithOptions(session.Options{
 		Config:            *config,
